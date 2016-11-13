@@ -1,0 +1,204 @@
+#!/bin/bash
+# chkconfig: 2345 01 99
+# description: Starts and stops iptables based firewall
+# This firewall is meant to be used on servers
+
+# Start the firewall #########################################################
+startFirewall() {
+
+echo -n "Starting firewall ..." 
+
+# Define variables ###########################################################
+IPT="$IPT"
+MOD="/sbin/modprobe"
+MY_TCP_OUT="22,80,443"
+MY_UDP_OUT="53,123"
+HIGH_PORTS="1024:65535"
+MY_NETS=" \
+x.x.x.x \
+"
+SSH_CLIENTS=" \
+${MY_NETS} \
+"
+
+# Flush rules, delete chains  ################################################
+$IPT -F
+$IPT -X
+$IPT -t nat -F
+$IPT -t nat -X
+$IPT -t mangle -F
+$IPT -t mangle -X
+
+# Zero all counters ##########################################################
+$IPT -Z
+$IPT -t nat -Z
+$IPT -t mangle -Z
+
+# Load Kernel Modules ########################################################
+$MOD ip_tables
+$MOD ip_conntrack
+
+# Set default policies #######################################################
+$IPT -P INPUT DROP
+$IPT -P OUTPUT DROP
+$IPT -P FORWARD DROP
+
+# Loopback rules #############################################################
+$IPT -A INPUT -i lo -j ACCEPT
+$IPT -A OUTPUT -o lo -j ACCEPT
+
+# Kernel Security ############################################################
+# Turn off IP forwarding unless acting as a router
+echo 0 > /proc/sys/net/ipv4/ip_forward
+# Only routers need this, so all others can turn it off
+echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+# ICMP redirects are important to routers, but a security concern otherwise
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+# Security risk because they make it too easy to spoof trusted address
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
+# Protect from a SYN flood attack
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+# Protect from source spoofing. Disable if forwarding packets between ifaces
+echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
+# Don't respond to ping broadcasts. Usually some type of attack (e.g. smurf)
+echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+# Allow incoming ping
+echo 0 > /proc/sys/net/ipv4/icmp_echo_ignore_all
+# Explicit congestion notificantion not universally supported
+echo 0 > /proc/sys/net/ipv4/tcp_ecn
+# Protect from bad error messages
+echo 1 > /proc/sys/net/ipv4/icmp_ignore_bogus_error_responses
+# Log spoofed as well as source-routed and redirected
+echo 1 > /proc/sys/net/ipv4/conf/all/log_martians
+# Abort orphaned connections (FIN_WAIT_2) sooner
+echo 22 > /proc/sys/net/ipv4/tcp_fin_timeout
+# Send keepalive message and if no response, mark connection as broken
+echo 1800 > /proc/sys/net/ipv4/tcp_keepalive_time
+# Num of SYN requests to keep in memory that we're still waiting for 3rd packet
+echo 1280 > /proc/sys/net/ipv4/tcp_max_syn_backlog
+# Turn off some extensions we don't need
+echo 0 > /proc/sys/net/ipv4/tcp_window_scaling
+echo 0 > /proc/sys/net/ipv4/tcp_sack
+echo 0 > /proc/sys/net/ipv4/tcp_timestamps
+# Increase conntrack_max table size (uses more RAM)
+echo 655200 > /proc/sys/net/netfilter/nf_conntrack_max
+# If increasing conntrack_max then adjust hashsize too (nf_conntrack_max / 8)
+echo 81900 > /sys/module/nf_conntrack/parameters/hashsize
+# Reduce conntrack tcp connection timeout to an hour (default: 5 days)
+echo 3600 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established
+
+# Further SYN protection  ####################################################
+# New packet must be SYN
+$IPT -A INPUT -p tcp ! --syn -m state --state NEW -j DROP
+# SYN/FIN/RST cannot occur together. FIN, PSH, URG only with ACK.
+$IPT -A INPUT -p tcp --tcp-flags SYN,FIN SYN,FIN -j DROP
+$IPT -A INPUT -p tcp --tcp-flags SYN,RST SYN,RST -j DROP
+$IPT -A INPUT -p tcp --tcp-flags RST,FIN RST,FIN -j DROP
+$IPT -A INPUT -p tcp --tcp-flags ACK,FIN FIN -j DROP
+$IPT -A INPUT -p tcp --tcp-flags ACK,PSH PSH -j DROP
+$IPT -A INPUT -p tcp --tcp-flags ACK,URG URG -j DROP
+
+# Drop packets with fragment bit set #########################################
+$IPT -A INPUT -f -j DROP
+
+# Outbound generic TCP/UDP ###################################################
+$IPT -A OUTPUT -p tcp --sport $HIGH_PORTS -m multiport --dports $MY_TCP_OUT -m state --state NEW,ESTABLISHED -j ACCEPT
+$IPT -A INPUT  -p tcp --dport $HIGH_PORTS -m multiport --sports $MY_TCP_OUT -m state --state ESTABLISHED -j ACCEPT
+$IPT -A OUTPUT -p udp --sport $HIGH_PORTS -m multiport --dports $MY_UDP_OUT -m state --state NEW,ESTABLISHED -j ACCEPT
+$IPT -A INPUT  -p udp --dport $HIGH_PORTS -m multiport --sports $MY_UDP_OUT -m state --state ESTABLISHED -j ACCEPT
+
+# Outbound NTP ###############################################################
+$IPT -A OUTPUT -p udp --sport 123 -m multiport --dports $MY_UDP_OUT -m state --state NEW,ESTABLISHED -j ACCEPT
+$IPT -A INPUT  -p udp --dport 123 -m multiport --sports $MY_UDP_OUT -m state --state ESTABLISHED -j ACCEPT
+
+# Inbound SSH access #########################################################
+for i in ${SSH_CLIENTS}; do
+  $IPT -A INPUT  -p tcp -s ${i} --dport 22 --sport $HIGH_PORTS -m state --state NEW,ESTABLISHED -j ACCEPT
+  $IPT -A OUTPUT -p tcp -d ${i} --sport 22 --dport $HIGH_PORTS -m state --state ESTABLISHED -j ACCEPT
+done 
+
+# Inbound DNS ################################################################
+$IPT -A OUTPUT -p udp --sport 53 -m state --state ESTABLISHED -j ACCEPT
+$IPT -A INPUT -p udp --dport 53 -m state --state NEW,ESTABLISHED -j ACCEPT
+$IPT -A OUTPUT -p tcp --sport 53 -m state --state ESTABLISHED -j ACCEPT
+$IPT -A INPUT -p tcp --dport 53 -m state --state NEW,ESTABLISHED -j ACCEPT
+
+# Traceroute #################################################################
+$IPT -A OUTPUT -p udp --sport 1024:65535 --dport 33434:33523 -m state --state NEW -j ACCEPT
+
+# Outbound ICMP ##############################################################
+$IPT -A OUTPUT -p icmp -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
+# Inbound ICMP ###############################################################
+# Accept related, e.g. traceroute; established, e.g. echo-reply from all
+$IPT -A INPUT -p icmp -m state --state ESTABLISHED,RELATED -j ACCEPT
+# Accept important ICMP packets from allowed networks
+for i in ${MY_NETS}; do
+  $IPT -A INPUT -p icmp --icmp-type echo-request -s ${i} -m limit --limit 5/s --limit-burst 10 -j ACCEPT
+  $IPT -A INPUT -p icmp --icmp-type time-exceeded -s ${i} -m limit --limit 5/s --limit-burst 10 -j ACCEPT
+  $IPT -A INPUT -p icmp --icmp-type destination-unreachable -s ${i} -m limit --limit 5/s --limit-burst 10 -j ACCEPT
+done
+
+# Logs #######################################################################
+$IPT -A INPUT -m limit --limit 2/s --limit-burst 10 -j LOG --log-prefix "FW: " --log-level 4
+$IPT -A OUTPUT -m limit --limit 2/s --limit-burst 10 -j LOG --log-prefix "FW: " --log-level 4
+
+# Drop everything else #######################################################
+$IPT -A INPUT -j DROP
+$IPT -A OUTPUT -j DROP
+
+} # End of startFirewall
+
+
+# Stop the firewall ##########################################################
+stopFirewall () {
+
+echo -n "Stopping Firewall ... "
+$IPT -F
+$IPT -X
+$IPT -Z
+$IPT -F -t nat
+$IPT -P INPUT ACCEPT
+$IPT -P OUTPUT ACCEPT
+$IPT -P FORWARD ACCEPT
+$IPT -t nat -P PREROUTING ACCEPT
+$IPT -t nat -P POSTROUTING ACCEPT
+$IPT -t nat -P OUTPUT ACCEPT
+
+} # End of stopFirewall
+
+
+# Control firewall script with start/stop/restart ############################
+case "$1" in
+   start)
+      startFirewall
+      NRULES=`$IPT -n -v -L | wc -l`
+      echo "Done. ${NRULES} are in place. Saving rules."
+      /sbin/service iptables save
+      echo
+   ;;
+   restart)
+      stopFirewall && startFirewall
+      NRULES=`$IPT -n -v -L | wc -l`
+      echo "Done. ${NRULES} are in place."
+      echo
+   ;;
+   stop)
+      stopFirewall
+      echo "Done. Checking rules..."
+      $IPT -n -v -L
+      echo
+   ;;
+   *)
+      echo "Usage: $0 {start|stop|restart}"
+      exit 1
+   ;;
+esac
+
+
+# References
+# https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt
+# https://books.google.com/books?id=P06O3lA0f5YC&pg=PA71
+# https://www.frozentux.net/ipsysctl-tutorial/ipsysctl-tutorial.html
+# http://wiki.centos.org/HowTos/Network/IPTables
+# http://serverfault.com/questions/184646/a-secure-standard-iptables-rule-set-for-a-basic-https-webserver
