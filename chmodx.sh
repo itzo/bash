@@ -2,13 +2,6 @@
 
 # Fix executable bit on all files recursively according to output of `file` cmd
 
-#   find . -type f -print0 | while IFS= read -r -d '' file; do 
-#       if file "$file" | egrep -qiv "Mach-O|GNU/Linux|shell script|executable"; then
-#           chmod -x "$file"
-#           #echo "$file - changed"
-#       fi
-#   done
-
 # bash -c '...' none {} causes a bash shell to run the command in the quotes
 # with the file name in {} assigned to positional argument $1. none is $0.
 
