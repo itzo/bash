@@ -6,7 +6,8 @@ read HOST
 echo "and the host to jump through:"
 read JUMPBOX
 
-sudo ssh -f -L 443:${HOST}:443 ${JUMPBOX} -N
-
-echo "now you have access to the host via:"
-echo "https://localhost"
+if sudo ssh -f -L 443:${HOST}:443 ${JUMPBOX} -N ; then
+    echo 'access via https://localhost'
+else
+    echo 'something went wrong...'
+fi
