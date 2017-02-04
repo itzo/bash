@@ -1,13 +1,15 @@
 #!/bin/bash
 # useful when blocked by a firewall and can't access server console (e.g. DRAC)
 
-echo "enter your final destination:"
+echo "Final destination:"
 read HOST   
-echo "and the host to jump through:"
+echo "Host to jump through:"
 read JUMPBOX
+echo "Port to forward:"
+read PORT
 
-if sudo ssh -f -L 443:${HOST}:443 ${JUMPBOX} -N ; then
-    echo 'access via https://localhost'
+if sudo ssh -f -L ${PORT}:${HOST}:${PORT} ${JUMPBOX} -N ; then
+    echo "Access via localhost on port $PORT"
 else
-    echo 'something went wrong...'
+    echo "Something went wrong..."
 fi
